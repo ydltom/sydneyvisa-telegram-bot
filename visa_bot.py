@@ -20,7 +20,12 @@ POLL_INTERVAL = 300  # seconds between polls (5 minutes)
 
 async def fetch_dates(page: Page) -> dict:
     response = await page.goto(API_URL, wait_until="networkidle")
+    status = response.status
     body = await response.text()
+    if status != 200 or not body.strip().startswith("{"):
+        print(f"fetch_dates: unexpected response (status={status}, length={len(body)})")
+        print(f"fetch_dates: body preview: {body[:500]}")
+        raise ValueError(f"API returned non-JSON response (status={status})")
     return json.loads(body)
 
 
@@ -183,14 +188,27 @@ async def main():
         )
         page = await browser_ctx.new_page()
 
-        print("Solving Vercel challenge...")
-        await page.goto(BLOG_URL, wait_until="networkidle")
-        print("Challenge passed.")
+        MAX_RETRIES = 10
+        RETRY_DELAY = 15  # seconds
 
-        data = await fetch_dates(page)
-        initial_dates = set(data["interview_dates"])
-        updated_at = data["updated_at"]
-        print(f"Loaded {len(initial_dates)} dates.\n")
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                print(f"Solving Vercel challenge (attempt {attempt}/{MAX_RETRIES})...")
+                await page.goto(BLOG_URL, wait_until="networkidle")
+                print("Challenge passed.")
+
+                data = await fetch_dates(page)
+                initial_dates = set(data["interview_dates"])
+                updated_at = data["updated_at"]
+                print(f"Loaded {len(initial_dates)} dates.\n")
+                break
+            except Exception as e:
+                print(f"Startup attempt {attempt} failed: {e}")
+                if attempt == MAX_RETRIES:
+                    print("All retries exhausted. Exiting.")
+                    raise
+                print(f"Retrying in {RETRY_DELAY}s...")
+                await asyncio.sleep(RETRY_DELAY)
 
         app = Application.builder().token(TELEGRAM_TOKEN).build()
         app.bot_data.update({
