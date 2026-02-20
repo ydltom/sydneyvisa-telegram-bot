@@ -141,14 +141,23 @@ async def poll_and_notify(app: Application):
         updated_at = data["updated_at"]
         last_dates = app.bot_data.get("last_dates", set())
 
-        print(f"[{updated_at[:16].replace('T', ' ')}] {len(current_dates)} dates available")
+        ts = updated_at[:16].replace("T", " ")
 
         if current_dates != last_dates and last_dates:
             new = current_dates - last_dates
             gone = last_dates - current_dates
             if new or gone:
+                parts = []
+                if new:
+                    parts.append(f"+{len(new)} new: {', '.join(sorted(new))}")
+                if gone:
+                    parts.append(f"-{len(gone)} gone: {', '.join(sorted(gone))}")
+                print(f"[{ts}] CHANGE — {len(current_dates)} dates | {' | '.join(parts)}")
                 msg = format_change_msg(new, gone, current_dates, updated_at)
                 await app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode=PARSE_MODE)
+        else:
+            nearest = min(sorted(current_dates)) if current_dates else "none"
+            print(f"[{ts}] No change — {len(current_dates)} dates | nearest: {nearest}")
 
         app.bot_data["last_dates"] = current_dates
         app.bot_data["last_updated"] = updated_at
