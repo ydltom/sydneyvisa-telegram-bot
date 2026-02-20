@@ -44,7 +44,10 @@ async def fetch_dates(page: Page) -> dict:
         print(f"fetch_dates: unexpected response (status={status}, length={len(body)})")
         print(f"fetch_dates: body preview: {body[:500]}")
         raise ValueError(f"API returned non-JSON response (status={status})")
-    return json.loads(body)
+    payload = json.loads(body)
+    run_id = payload.get("run_id", "N/A")
+    print(f"fetch_dates: run_id={run_id}, keys={list(payload.keys())}")
+    return payload
 
 
 def render_calendars(date_strings: set[str]) -> str:
@@ -79,23 +82,25 @@ def render_calendars(date_strings: set[str]) -> str:
     return "\n\n".join(blocks)
 
 
-def format_dates_msg(dates: set[str], updated_at: str) -> str:
+def format_dates_msg(dates: set[str], updated_at: str, run_id: str = "N/A") -> str:
     ts = updated_at[:16].replace("T", " ")
     calendars = render_calendars(dates)
     return (
         f"🇦🇺 <b>Sydney E-3 Visa Update</b>\n"
-        f"<i>as of {ts} UTC</i>\n\n"
+        f"<i>as of {ts} UTC</i>\n"
+        f"<i>run_id: {run_id}</i>\n\n"
         f"📅 <b>{len(dates)} dates available:</b>\n\n"
         f"<pre>{calendars}</pre>\n\n"
         f'🔗 <a href="https://www.ustraveldocs.com/">Book now</a>'
     )
 
 
-def format_change_msg(new: set[str], gone: set[str], all_dates: set[str], updated_at: str) -> str:
+def format_change_msg(new: set[str], gone: set[str], all_dates: set[str], updated_at: str, run_id: str = "N/A") -> str:
     ts = updated_at[:16].replace("T", " ")
     lines = [
         f"🇦🇺 <b>Sydney E-3 Visa Update</b>",
         f"<i>as of {ts} UTC</i>",
+        f"<i>run_id: {run_id}</i>",
     ]
     if new:
         lines.append(f"\n✅ <b>New slots:</b> {', '.join(sorted(new))}")
@@ -116,11 +121,12 @@ async def cmd_dates(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show the last-known available dates (cached)."""
     last_dates = context.bot_data.get("last_dates", set())
     last_updated = context.bot_data.get("last_updated")
+    last_run_id = context.bot_data.get("last_run_id", "N/A")
     if not last_dates:
         await update.message.reply_text("No data yet — waiting for first poll.")
         return
     await update.message.reply_text(
-        format_dates_msg(last_dates, last_updated),
+        format_dates_msg(last_dates, last_updated, last_run_id),
         parse_mode=PARSE_MODE,
     )
 
@@ -133,10 +139,12 @@ async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = await fetch_dates(page)
         current_dates = set(data["interview_dates"])
         updated_at = data["updated_at"]
+        run_id = data.get("run_id", "N/A")
         context.bot_data["last_dates"] = current_dates
         context.bot_data["last_updated"] = updated_at
+        context.bot_data["last_run_id"] = run_id
         await sent.edit_text(
-            format_dates_msg(current_dates, updated_at),
+            format_dates_msg(current_dates, updated_at, run_id),
             parse_mode=PARSE_MODE,
         )
     except Exception as e:
@@ -162,6 +170,7 @@ async def poll_and_notify(app: Application):
         data = await fetch_dates(page)
         current_dates = set(data["interview_dates"])
         updated_at = data["updated_at"]
+        run_id = data.get("run_id", "N/A")
         last_dates = app.bot_data.get("last_dates", set())
 
         ts = updated_at[:16].replace("T", " ")
@@ -175,15 +184,16 @@ async def poll_and_notify(app: Application):
                     parts.append(f"+{len(new)} new: {', '.join(sorted(new))}")
                 if gone:
                     parts.append(f"-{len(gone)} gone: {', '.join(sorted(gone))}")
-                print(f"[{ts}] CHANGE — {len(current_dates)} dates | {' | '.join(parts)}")
-                msg = format_change_msg(new, gone, current_dates, updated_at)
+                print(f"[{ts}] run_id={run_id} CHANGE — {len(current_dates)} dates | {' | '.join(parts)}")
+                msg = format_change_msg(new, gone, current_dates, updated_at, run_id)
                 await app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode=PARSE_MODE)
         else:
             nearest = min(sorted(current_dates)) if current_dates else "none"
-            print(f"[{ts}] No change — {len(current_dates)} dates | nearest: {nearest}")
+            print(f"[{ts}] run_id={run_id} No change — {len(current_dates)} dates | nearest: {nearest}")
 
         app.bot_data["last_dates"] = current_dates
         app.bot_data["last_updated"] = updated_at
+        app.bot_data["last_run_id"] = run_id
 
     except Exception as e:
         print(f"Poll error: {e}")
@@ -216,7 +226,8 @@ async def main():
                 data = await fetch_dates(page)
                 initial_dates = set(data["interview_dates"])
                 updated_at = data["updated_at"]
-                print(f"Loaded {len(initial_dates)} dates.\n")
+                initial_run_id = data.get("run_id", "N/A")
+                print(f"Loaded {len(initial_dates)} dates (run_id={initial_run_id}).\n")
                 break
             except Exception as e:
                 print(f"Startup attempt {attempt} failed: {e}")
@@ -231,6 +242,7 @@ async def main():
             "page": page,
             "last_dates": initial_dates,
             "last_updated": updated_at,
+            "last_run_id": initial_run_id,
         })
 
         app.add_handler(CommandHandler("dates", cmd_dates))
@@ -239,7 +251,7 @@ async def main():
         app.add_handler(CommandHandler("start", cmd_help))
 
         async with app:
-            startup_msg = format_dates_msg(initial_dates, updated_at)
+            startup_msg = format_dates_msg(initial_dates, updated_at, initial_run_id)
             await app.bot.send_message(chat_id=CHAT_ID, text=startup_msg, parse_mode=PARSE_MODE)
 
             await app.updater.start_polling()
