@@ -18,10 +18,28 @@ BLOG_URL = "https://migratemate.co/blog/e3-visa-appointment-calendar"
 POLL_INTERVAL = 300  # seconds between polls (5 minutes)
 
 
+async def solve_vercel_challenge(page: Page):
+    """Navigate to the blog page and wait for Vercel's JS challenge to resolve."""
+    await page.goto(BLOG_URL, wait_until="networkidle")
+    for _ in range(20):
+        title = await page.title()
+        if "Security Checkpoint" not in title and "Vercel" not in title:
+            print(f"Challenge solved. Page title: {title}")
+            return
+        await page.wait_for_timeout(1500)
+    raise ValueError("Vercel challenge did not resolve after waiting")
+
+
 async def fetch_dates(page: Page) -> dict:
-    response = await page.goto(API_URL, wait_until="networkidle")
-    status = response.status
-    body = await response.text()
+    """Fetch API data using an in-page fetch() to preserve Vercel session cookies."""
+    result = await page.evaluate("""
+        async (url) => {
+            const resp = await fetch(url);
+            return { status: resp.status, body: await resp.text() };
+        }
+    """, API_URL)
+    status = result["status"]
+    body = result["body"]
     if status != 200 or not body.strip().startswith("{"):
         print(f"fetch_dates: unexpected response (status={status}, length={len(body)})")
         print(f"fetch_dates: body preview: {body[:500]}")
@@ -171,8 +189,7 @@ async def poll_and_notify(app: Application):
         print(f"Poll error: {e}")
         try:
             print("Re-solving Vercel challenge...")
-            await page.goto(BLOG_URL, wait_until="networkidle")
-            print("Challenge re-solved.")
+            await solve_vercel_challenge(page)
         except Exception as inner:
             print(f"Re-solve failed: {inner}")
 
@@ -194,8 +211,7 @@ async def main():
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 print(f"Solving Vercel challenge (attempt {attempt}/{MAX_RETRIES})...")
-                await page.goto(BLOG_URL, wait_until="networkidle")
-                print("Challenge passed.")
+                await solve_vercel_challenge(page)
 
                 data = await fetch_dates(page)
                 initial_dates = set(data["interview_dates"])
