@@ -5,7 +5,7 @@ import os
 from collections import defaultdict
 from datetime import date
 from dotenv import load_dotenv
-from playwright.async_api import async_playwright, Page
+import httpx
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -18,33 +18,16 @@ BLOG_URL = "https://migratemate.co/blog/e3-visa-appointment-calendar"
 POLL_INTERVAL = 300  # seconds between polls (5 minutes)
 
 
-async def solve_vercel_challenge(page: Page):
-    """Navigate to the blog page and wait for Vercel's JS challenge to resolve."""
-    await page.goto(BLOG_URL, wait_until="networkidle")
-    for _ in range(20):
-        title = await page.title()
-        if "Security Checkpoint" not in title and "Vercel" not in title:
-            print(f"Challenge solved. Page title: {title}")
-            return
-        await page.wait_for_timeout(1500)
-    raise ValueError("Vercel challenge did not resolve after waiting")
-
-
-async def fetch_dates(page: Page) -> dict:
-    """Fetch API data using an in-page fetch() to preserve Vercel session cookies."""
-    result = await page.evaluate("""
-        async (url) => {
-            const resp = await fetch(url);
-            return { status: resp.status, body: await resp.text() };
-        }
-    """, API_URL)
-    status = result["status"]
-    body = result["body"]
+async def fetch_dates(client: httpx.AsyncClient) -> dict:
+    """Fetch interview slot data from the MigrateMate API."""
+    response = await client.get(API_URL)
+    status = response.status_code
+    body = response.text
     if status != 200 or not body.strip().startswith("{"):
         print(f"fetch_dates: unexpected response (status={status}, length={len(body)})")
         print(f"fetch_dates: body preview: {body[:500]}")
         raise ValueError(f"API returned non-JSON response (status={status})")
-    return json.loads(body)
+    return response.json()
 
 
 def render_calendars(date_strings: set[str]) -> str:
@@ -127,10 +110,10 @@ async def cmd_dates(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Fetch fresh data from the API right now."""
-    page = context.bot_data["page"]
+    client = context.bot_data["client"]
     sent = await update.message.reply_text("Fetching fresh data...")
     try:
-        data = await fetch_dates(page)
+        data = await fetch_dates(client)
         current_dates = set(data["interview_dates"])
         updated_at = data["updated_at"]
         context.bot_data["last_dates"] = current_dates
@@ -157,9 +140,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Background polling ────────────────────────────────────────────
 
 async def poll_and_notify(app: Application):
-    page = app.bot_data["page"]
+    client = app.bot_data["client"]
     try:
-        data = await fetch_dates(page)
+        data = await fetch_dates(client)
         current_dates = set(data["interview_dates"])
         updated_at = data["updated_at"]
         last_dates = app.bot_data.get("last_dates", set())
@@ -187,33 +170,31 @@ async def poll_and_notify(app: Application):
 
     except Exception as e:
         print(f"Poll error: {e}")
-        try:
-            print("Re-solving Vercel challenge...")
-            await solve_vercel_challenge(page)
-        except Exception as inner:
-            print(f"Re-solve failed: {inner}")
 
 
 # ── Main ──────────────────────────────────────────────────────────
 
 async def main():
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        browser_ctx = await browser.new_context(
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
-        )
-        page = await browser_ctx.new_page()
+    client = httpx.AsyncClient(
+        headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": BLOG_URL,
+        },
+        timeout=30.0,
+        follow_redirects=True,
+    )
 
-        MAX_RETRIES = 10
-        RETRY_DELAY = 15  # seconds
+    MAX_RETRIES = 10
+    RETRY_DELAY = 15  # seconds
 
+    try:
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                print(f"Solving Vercel challenge (attempt {attempt}/{MAX_RETRIES})...")
-                await solve_vercel_challenge(page)
-
-                data = await fetch_dates(page)
+                print(f"Fetching initial data (attempt {attempt}/{MAX_RETRIES})...")
+                data = await fetch_dates(client)
                 initial_dates = set(data["interview_dates"])
                 updated_at = data["updated_at"]
                 print(f"Loaded {len(initial_dates)} dates.\n")
@@ -228,7 +209,7 @@ async def main():
 
         app = Application.builder().token(TELEGRAM_TOKEN).build()
         app.bot_data.update({
-            "page": page,
+            "client": client,
             "last_dates": initial_dates,
             "last_updated": updated_at,
         })
@@ -256,7 +237,8 @@ async def main():
                 await app.updater.stop()
                 await app.stop()
 
-        await browser.close()
+    finally:
+        await client.aclose()
 
 
 if __name__ == "__main__":
