@@ -1,5 +1,7 @@
 FROM mcr.microsoft.com/playwright/python:v1.49.0-noble
 
+ENV PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
 COPY requirements.txt .
