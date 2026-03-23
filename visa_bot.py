@@ -70,7 +70,7 @@ def render_calendars(date_strings: set[str]) -> str:
             cells = []
             for day in week:
                 if day == 0:
-                    cells.append("  ")
+                    cells.append("\u00a0\u00a0")
                 elif day in avail:
                     cells.append(f"{day:>2}")
                 else:
